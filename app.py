@@ -95,6 +95,19 @@ async def db_connection(app: Litestar) -> AsyncGenerator[None, None]:
     finally:
         await engine.dispose
 
+sessionmaker = async_sessionmaker(expire_on_commit=False)
+
+async def provide_transaction(state: State) -> AsyncGenerator[AsyncSession, None]:
+    async with sessionmaker(bind = state.engine) as session: 
+        try: 
+            async with session.begin():
+                yield session 
+        except IndentationError as exc:
+            raise ClientException (
+                status_code= HTTP_409_CONFLICT,
+                detail=str(exc),
+            )from exc
+
 async def get_todo_list(done: bool | None, session: AsyncSession) -> Sequence[TodoItem]:
     query = select(TodoItem)
     if done is not None: 
@@ -111,34 +124,25 @@ async def get_todo_by_title(todo_name:str, session: AsyncSession) -> TodoItem:
         raise NotFoundException(detail=f"TODO {todo_name!r} not found") from e
 
 @get("/")
-async def get_list(state: State, done: bool | None=None) -> todoCollectionType:
-    async with async_sessionmaker(bind=state.engine) as session:
-        return [serialize_todo(todo) for todo in await get_todo_list(done,session)] 
-
+async def get_list(transaction: AsyncSession, done: bool | None=None) -> todoCollectionType:
+    return [serialize_todo(todo) for todo in await get_todo_list(done,transaction)]
 
 @post("/")
-async def add_item(data:TodoType, state: State) -> TodoType:
+async def add_item(data:TodoType, transaction: AsyncSession) -> TodoType:
     new_todo = TodoItem(title=data["title"], done=data["done"])
-    async with async_sessionmaker(bind=state.engine) as session:
-        try: 
-            async with session.begin():
-                session.add(new_todo)
-        except IntegrityError as e:
-            raise ClientException(
-                status_code=HTTP_409_CONFLICT,
-                detail=f"TODO {new_todo.title!r} already exists"
-            ) from e
+    transaction.add(new_todo)
 
     return serialize_todo(new_todo)
 
 @put("/{item_title:str}")
-async def update_item(item_title: str, data: TodoType, state: State) -> TodoType:
-    async with async_sessionmaker(bind=state.engine) as session, session.begin():
-
-        todo_item = await get_todo_by_title(item_title, session)
+async def update_item(item_title: str, data: TodoType, transaction: AsyncSession) -> TodoType:
+        todo_item = await get_todo_by_title(item_title, transaction)
         todo_item.title = data["title"]
         todo_item.done = data["done"]
-    return serialize_todo(todo_item)
+        return serialize_todo(todo_item)
 
-
-app = Litestar([get_list,add_item,update_item], lifespan=[db_connection])
+app = Litestar(
+    [get_list,add_item,update_item], 
+    dependencies={"transaction": provide_transaction},
+    lifespan=[db_connection],
+)
