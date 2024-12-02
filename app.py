@@ -65,9 +65,8 @@ from litestar.exceptions import ClientException,NotFoundException
 from typing import Any
 from litestar.datastructures import State
 from litestar.status_codes import HTTP_409_CONFLICT
+from litestar.contrib.sqlalchemy.plugins import SQLAlchemySerializationPlugin
 
-TodoType = dict[str, Any]
-todoCollectionType = list[TodoType]
 
 class Base(DeclarativeBase): ...
 
@@ -76,9 +75,6 @@ class TodoItem(Base):
 
     title: Mapped[str] = mapped_column(primary_key=True)
     done: Mapped[bool]
-
-def serialize_todo(todo: TodoItem)  -> TodoType:
-    return {"title": todo.title, "done": todo.done}
 
 @asynccontextmanager
 async def db_connection(app: Litestar) -> AsyncGenerator[None, None]:
@@ -124,25 +120,24 @@ async def get_todo_by_title(todo_name:str, session: AsyncSession) -> TodoItem:
         raise NotFoundException(detail=f"TODO {todo_name!r} not found") from e
 
 @get("/")
-async def get_list(transaction: AsyncSession, done: bool | None=None) -> todoCollectionType:
-    return [serialize_todo(todo) for todo in await get_todo_list(done,transaction)]
+async def get_list(transaction: AsyncSession, done: bool | None=None) -> list[TodoItem]:
+    return await get_todo_list(done,transaction)
 
 @post("/")
-async def add_item(data:TodoType, transaction: AsyncSession) -> TodoType:
-    new_todo = TodoItem(title=data["title"], done=data["done"])
-    transaction.add(new_todo)
-
-    return serialize_todo(new_todo)
+async def add_item(data:TodoItem, transaction: AsyncSession) -> TodoItem:
+    transaction.add(data)
+    return data
 
 @put("/{item_title:str}")
-async def update_item(item_title: str, data: TodoType, transaction: AsyncSession) -> TodoType:
+async def update_item(item_title: str, data: TodoItem, transaction: AsyncSession) -> TodoItem:
         todo_item = await get_todo_by_title(item_title, transaction)
         todo_item.title = data["title"]
         todo_item.done = data["done"]
-        return serialize_todo(todo_item)
+        return todo_item
 
 app = Litestar(
     [get_list,add_item,update_item], 
     dependencies={"transaction": provide_transaction},
     lifespan=[db_connection],
+    plugins=[SQLAlchemySerializationPlugin()],
 )
