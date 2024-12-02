@@ -65,8 +65,7 @@ from litestar.exceptions import ClientException,NotFoundException
 from typing import Any
 from litestar.datastructures import State
 from litestar.status_codes import HTTP_409_CONFLICT
-from litestar.contrib.sqlalchemy.plugins import SQLAlchemySerializationPlugin
-
+from litestar.contrib.sqlalchemy.plugins import SQLAlchemyAsyncConfig, SQLAlchemyPlugin
 
 class Base(DeclarativeBase): ...
 
@@ -93,11 +92,10 @@ async def db_connection(app: Litestar) -> AsyncGenerator[None, None]:
 
 sessionmaker = async_sessionmaker(expire_on_commit=False)
 
-async def provide_transaction(state: State) -> AsyncGenerator[AsyncSession, None]:
-    async with sessionmaker(bind = state.engine) as session: 
+async def provide_transaction(db_session: AsyncSession) -> AsyncGenerator[AsyncSession, None]:
         try: 
-            async with session.begin():
-                yield session 
+            async with db_session.begin():
+                yield db_session
         except IndentationError as exc:
             raise ClientException (
                 status_code= HTTP_409_CONFLICT,
@@ -131,13 +129,16 @@ async def add_item(data:TodoItem, transaction: AsyncSession) -> TodoItem:
 @put("/{item_title:str}")
 async def update_item(item_title: str, data: TodoItem, transaction: AsyncSession) -> TodoItem:
         todo_item = await get_todo_by_title(item_title, transaction)
-        todo_item.title = data["title"]
-        todo_item.done = data["done"]
+        todo_item.title = data.title
+        todo_item.done = data.done
         return todo_item
 
+db_config = SQLAlchemyAsyncConfig(
+    connection_string="sqlite+aiosqlite:///todo.sqlite", metadata=Base.metadata, create_all=True
+)
 app = Litestar(
     [get_list,add_item,update_item], 
     dependencies={"transaction": provide_transaction},
     lifespan=[db_connection],
-    plugins=[SQLAlchemySerializationPlugin()],
+    plugins=[(SQLAlchemyPlugin(db_config))],
 )
